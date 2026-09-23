@@ -1,4 +1,4 @@
-#define _DEFAULT_SOURCE
+#define _POSIX_C_SOURCE 200809L
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -6,6 +6,7 @@
 #include <sys/types.h>
 #include <sys/resource.h>
 #include <limits.h>
+#include <ulimit.h>
 
 extern char **environ;
 
@@ -16,7 +17,7 @@ int main(int argc, char *argv[]) {
     char *args[argc];
     int count = 0;
 
-    while ((opt = getopt(argc, argv, "ispU:cC:dV:v")) != -1) {
+    while ((opt = getopt(argc, argv, "ispuU:cC:dV:v")) != -1) {
         options[count] = opt;
         args[count] = optarg;
         count++;
@@ -43,22 +44,13 @@ int main(int argc, char *argv[]) {
             printf("PGID: %d\n", getpgrp());
             break;
 
-        case 'u': {
-            struct rlimit limit;
-
-            getrlimit(RLIMIT_FSIZE, &limit);
-            printf("Ulimit: %ld\n", (long)limit.rlim_cur);
+        case 'u':
+            printf("Ulimit: %ld\n", ulimit(UL_GETFSIZE));
             break;
-        }
 
-        case 'U': {
-            struct rlimit limit;
-
-            getrlimit(RLIMIT_FSIZE, &limit);
-            limit.rlim_cur = atol(args[i]);
-            setrlimit(RLIMIT_FSIZE, &limit);
+        case 'U':
+            ulimit(UL_SETFSIZE, atol(args[i]));
             break;
-        }
 
         case 'c': {
             struct rlimit limit;
@@ -69,16 +61,16 @@ int main(int argc, char *argv[]) {
         }
 
         case 'C': {
-            struct rlimit limit2;
+            struct rlimit limit;
 
-            limit2.rlim_cur = atol(args[i]);
-            limit2.rlim_max = atol(args[i]);
-            setrlimit(RLIMIT_CORE, &limit2);
+            getrlimit(RLIMIT_CORE, &limit);
+            limit.rlim_cur = atol(args[i]);
+            setrlimit(RLIMIT_CORE, &limit);
             break;
         }
 
         case 'd': {
-            char dir[4096];
+            char dir[PATH_MAX];
 
             getcwd(dir, sizeof(dir));
             printf("%s\n", dir);
