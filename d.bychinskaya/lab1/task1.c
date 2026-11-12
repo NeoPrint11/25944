@@ -1,101 +1,221 @@
-#define _POSIX_C_SOURCE 200809L
+#define _XOPEN_SOURCE 500
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>
-#include <sys/types.h>
-#include <sys/resource.h>
-#include <limits.h>
-#include <ulimit.h>
+#include <stdio.h> 
+#include <stdlib.h> 
+#include <unistd.h> 
+#include <sys/resource.h> 
+#include <errno.h> 
+#include <limits.h> 
 
-extern char **environ;
+extern char **environ; // массив строк окружения (PATH HOME USER)
+static long nproc_override = -1; // значение для -u в этом запуске, системный лимит не меняет
 
-int main(int argc, char *argv[]) {
-    int opt;
-    int i;
-    char options[argc];
-    char *args[argc];
-    int count = 0;
 
-    while ((opt = getopt(argc, argv, "ispuU:cC:dV:v")) != -1) {
-        options[count] = opt;
-        args[count] = optarg;
-        count++;
+static int get_number(const char *str, long *value) // строка в неотрицательное число
+{
+    char *end; // сюда strtol запишет, где закончил читать число
+
+    errno = 0;
+    *value = strtol(str, &end, 10); // преобразуем строку в long, основание 10
+
+    if (errno != 0 || end == str || *end != '\0' || *value < 0) // ошибки и мусор после числа
+    {
+        return -1; 
     }
 
-    for (i = count - 1; i >= 0; i--) {
+    return 0; 
+}
 
-        switch (options[i]) {
 
+static int process_options(int argc, char *argv[]) 
+{
+    int option; // текущая опция
+    int bad_option; 
+    int status; // 0 - успешно, 1 - ошибка
+    char *argument; // аргумент опции 
+
+    long value; // число для U и C
+    struct rlimit limit; // лимиты ресурсов процесса
+    char path[PATH_MAX]; // буфер для текущей директории
+    char **env; // указатель для environ
+
+    option = getopt(argc, argv, ":ispuU:cC:dvV:"); // читаем очередную опцию
+
+    if (option == -1) // опций больше нет
+    {
+        return 0;
+    }
+
+    argument = optarg; // следующий getopt изменит optarg
+    bad_option = optopt; // следующий getopt изменит optopt
+
+    status = process_options(argc, argv); // рекурсивно идём до самой правой опции
+
+    switch (option) // выполняем текущую опцию после всех опций справа
+    {
         case 'i':
-            printf("Real UID: %d\n", getuid());
-            printf("Effective UID: %d\n", geteuid());
-            printf("Real GID: %d\n", getgid());
-            printf("Effective GID: %d\n", getegid());
+            printf("Real UID: %ld\n", (long)getuid()); // реальный UID
+            printf("Effective UID: %ld\n", (long)geteuid()); // эффективный UID
+            printf("Real GID: %ld\n", (long)getgid()); // реальный GID
+            printf("Effective GID: %ld\n", (long)getegid()); // эффективный GID
             break;
 
         case 's':
-            setpgid(0, 0);
+            if (setpgid(0, 0) == -1) // делаем текущий процесс лидером группы
+            {
+                perror("setpgid");
+                status = 1;
+            }
             break;
 
         case 'p':
-            printf("PID: %d\n", getpid());
-            printf("PPID: %d\n", getppid());
-            printf("PGID: %d\n", getpgrp());
+            printf("PID: %ld\n", (long)getpid()); // PID текущего процесса
+            printf("PPID: %ld\n", (long)getppid()); // PID родителя
+            printf("PGID: %ld\n", (long)getpgrp()); // ID группы процессов
             break;
 
         case 'u':
-            printf("Ulimit: %ld\n", ulimit(UL_GETFSIZE));
+            errno = 0;
+            value = nproc_override;
+            if (value == -1) // -U ещё не задавала локальное значение
+            {
+                value = sysconf(_SC_CHILD_MAX); // системный лимит процессов пользователя
+            }
+
+            if (value == -1 && errno != 0)
+            {
+                perror("sysconf");
+                status = 1;
+            }
+            else if (value == -1) // sysconf не сообщает конечного лимита
+            {
+                printf("unlimited\n");
+            }
+            else
+            {
+                printf("%ld\n", value);
+            }
             break;
 
         case 'U':
-            ulimit(UL_SETFSIZE, atol(args[i]));
-            break;
-
-        case 'c': {
-            struct rlimit limit;
-
-            getrlimit(RLIMIT_CORE, &limit);
-            printf("Core size: %ld\n", (long)limit.rlim_cur);
-            break;
-        }
-
-        case 'C': {
-            struct rlimit limit;
-
-            getrlimit(RLIMIT_CORE, &limit);
-            limit.rlim_cur = atol(args[i]);
-            setrlimit(RLIMIT_CORE, &limit);
-            break;
-        }
-
-        case 'd': {
-            char dir[PATH_MAX];
-
-            getcwd(dir, sizeof(dir));
-            printf("%s\n", dir);
-            break;
-        }
-
-        case 'v': {
-            char **env = environ;
-
-            while (*env != NULL) {
-                printf("%s\n", *env);
-                env++;
+            if (get_number(argument, &value) == -1) // переводим аргумент U в число
+            {
+                fprintf(stderr, "Invalid ulimit value: %s\n", argument);
+                status = 1;
+            }
+            else
+            {
+                nproc_override = value; // сохраняем только в нашей программе
+                printf("%ld\n", value);
             }
             break;
-        }
+
+        case 'c':
+            if (getrlimit(RLIMIT_CORE, &limit) == -1) // получаем лимит размера core-файла
+            {
+                perror("getrlimit");
+                status = 1;
+            }
+            else if (limit.rlim_cur == RLIM_INFINITY) // если лимита нет
+            {
+                printf("unlimited\n");
+            }
+            else
+            {
+                printf("%llu\n",
+                       (unsigned long long)limit.rlim_cur); // печатаем soft limit в байтах
+            }
+            break;
+
+        case 'C':
+            if (get_number(argument, &value) == -1) // переводим size в число
+            {
+                fprintf(stderr, "Invalid core size: %s\n", argument);
+                status = 1;
+            }
+            else if (getrlimit(RLIMIT_CORE, &limit) == -1) // получаем текущие лимиты
+            {
+                perror("getrlimit");
+                status = 1;
+            }
+            else
+            {
+                limit.rlim_cur = (rlim_t)value; // меняем soft limit
+
+                if (setrlimit(RLIMIT_CORE, &limit) == -1) // устанавливаем новый core limit
+                {
+                    perror("setrlimit");
+                    status = 1;
+                }
+            }
+            break;
+
+        case 'd':
+            if (getcwd(path, sizeof(path)) == NULL) // получаем текущую директорию
+            {
+                perror("getcwd");
+                status = 1;
+            }
+            else
+            {
+                printf("%s\n", path);
+            }
+            break;
+
+        case 'v':
+            for (env = environ; *env != NULL; env++) // перебираем всё окружение
+            {
+                printf("%s\n", *env); // печатаем одну переменную окружения
+            }
+            break;
 
         case 'V':
-            putenv(args[i]);
+            if (putenv(argument) == -1) // добавляем или изменяем NAME=VALUE
+            {
+                perror("putenv");
+                status = 1;
+            }
             break;
 
-        default:
-            printf("Invalid option\n");
+        case '?':
+            fprintf(stderr, "Unknown option: -%c\n", bad_option); // неизвестная опция
+            status = 1;
             break;
-        }
+
+        case ':':
+            fprintf(stderr,
+                    "Option -%c requires an argument\n",
+                    bad_option); // для U, C или V не передали аргумент
+            status = 1;
+            break;
     }
 
-    return 0;
+    return status; // возвращаем итоговый код программы
 }
+
+
+int main(int argc, char *argv[])
+{
+    if (argc == 1) // без аргументов выводим справку
+    {
+        printf("Usage: %s [options]\n"
+               "Options are executed from right to left.\n"
+               "  -i Print real and effective UID/GID\n"
+               "  -s Become a process group leader\n"
+               "  -p Print PID, PPID and PGID\n"
+               "  -u Print user process limit or local value\n"
+               "  -Uvalue Set and print local value for -u\n"
+               "  -c Print core file limit in bytes\n"
+               "  -Csize Set core file limit in bytes\n"
+               "  -d Print current directory\n"
+               "  -v Print environment variables\n"
+               "  -Vname=value Set an environment variable\n",
+               argv[0]);
+        return 0;
+    }
+
+    opterr = 0; // запрещаем getopt самому печатать ошибки
+
+    return process_options(argc, argv); // запускаем обработку всех опций
+}
+
